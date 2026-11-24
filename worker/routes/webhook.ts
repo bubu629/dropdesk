@@ -17,9 +17,30 @@ app.post('/telegram', async (c) => {
   // 1. 处理支付前预检（必须 10 秒内响应）
   if (update.pre_checkout_query) {
     const query = update.pre_checkout_query;
-    const orderId = query.invoice_payload;
+    const payload: string = query.invoice_payload || '';
+
+    // 1a. Pro 套餐订阅预检
+    if (payload.startsWith('sub:')) {
+      const [, merchantId, daysStr] = payload.split(':');
+      const days = Number(daysStr);
+      const expectedStars = days === 365 ? 2500 : days === 30 ? 250 : -1;
+      const merchant = await c.env.DB.prepare(`SELECT id FROM merchants WHERE id = ?1`)
+        .bind(merchantId)
+        .first();
+      const isValid = Boolean(merchant) && expectedStars > 0 && query.total_amount === expectedStars;
+
+      await answerPreCheckoutQuery(
+        c.env.TELEGRAM_BOT_TOKEN,
+        query.id,
+        isValid,
+        isValid ? undefined : '订阅信息无效，请重新发起升级'
+      );
+      return c.text('OK');
+    }
+
+    // 1b. 普通商品订单预检
     const order = await c.env.DB.prepare(`SELECT * FROM orders WHERE id = ?1`)
-      .bind(orderId)
+      .bind(payload)
       .first<any>();
 
     const isValid =
@@ -37,14 +58,14 @@ app.post('/telegram', async (c) => {
     return c.text('OK');
   }
 
-  // 2. 处理 Stars 支付成功回调（幂等 + 自动发货）
+  // 2. 处理 Stars 支付成功回调
   if (update.message?.successful_payment) {
     const sp = update.message.successful_payment;
-    const orderId = sp.invoice_payload;
+    const payload: string = sp.invoice_payload || '';
     const chargeId = sp.telegram_payment_charge_id;
     const now = Date.now();
 
-    // 幂等去重：同一个 chargeId 只处理一次
+    // 幂等去重
     const dedup = await c.env.DB.prepare(
       `INSERT OR IGNORE INTO webhook_events (event_id, source, event_type, payload, processed_at)
        VALUES (?1, 'TELEGRAM', 'successful_payment', ?2, ?3)`
@@ -56,6 +77,35 @@ app.post('/telegram', async (c) => {
       return c.text('OK');
     }
 
+    // 2a. Pro 套餐订阅开通/续费
+    if (payload.startsWith('sub:')) {
+      const [, merchantId, daysStr] = payload.split(':');
+      const days = Number(daysStr) || 30;
+      const merchant = await c.env.DB.prepare(`SELECT * FROM merchants WHERE id = ?1`)
+        .bind(merchantId)
+        .first<any>();
+
+      if (merchant) {
+        const baseTime = Math.max(now, merchant.plan_expires_at || 0);
+        const newExpiresAt = baseTime + days * 24 * 60 * 60 * 1000;
+        await c.env.DB.prepare(
+          `UPDATE merchants SET plan = 'PRO', plan_expires_at = ?1, updated_at = ?2 WHERE id = ?3`
+        )
+          .bind(newExpiresAt, now, merchantId)
+          .run();
+
+        const expireDateStr = new Date(newExpiresAt).toISOString().slice(0, 10);
+        await sendMessage(
+          c.env.TELEGRAM_BOT_TOKEN,
+          merchant.telegram_user_id,
+          `🎉 <b>DropDesk Pro 已开通！</b>\n\n本次增加：${days} 天\n到期日期：<code>${expireDateStr}</code>\n\n现在你可以无限制上架商品了。`
+        ).catch(() => {});
+      }
+      return c.text('OK');
+    }
+
+    // 2b. 普通商品订单支付成功 -> 自动发货
+    const orderId = payload;
     await c.env.DB.batch([
       c.env.DB.prepare(
         `INSERT INTO payments (id, order_id, channel, currency, amount, telegram_payment_charge_id, provider_payment_charge_id, status, raw_payload, created_at, updated_at)
@@ -76,7 +126,6 @@ app.post('/telegram', async (c) => {
       ).bind(now, orderId),
     ]);
 
-    // 异步触发自动发货（不阻塞 Webhook 响应）
     c.executionCtx.waitUntil(executeOrderDelivery(c.env, orderId));
     return c.text('OK');
   }

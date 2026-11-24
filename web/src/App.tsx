@@ -44,6 +44,7 @@ export default function App() {
   // 导入卡密
   const [importVariantId, setImportVariantId] = useState<string | null>(null);
   const [keysText, setKeysText] = useState('');
+  const [showUpgrade, setShowUpgrade] = useState(false);
 
   const notify = (msg: string) => {
     setToast(msg);
@@ -299,6 +300,30 @@ export default function App() {
     }
   }
 
+  
+  async function handleUpgrade(cycle: 'MONTHLY' | 'YEARLY') {
+    try {
+      const res = await apiRequest('/api/merchant/upgrade/invoice', {
+        method: 'POST',
+        body: JSON.stringify({ cycle }),
+      });
+      const tg = getTgWebApp();
+      if (tg?.openInvoice) {
+        tg.openInvoice(res.invoice_url, (status) => {
+          if (status === 'paid') {
+            setShowUpgrade(false);
+            notify('支付成功！Pro 套餐已自动生效');
+            setTimeout(() => loadMerchantData(), 1500);
+          }
+        });
+      } else {
+        window.open(res.invoice_url, '_blank');
+      }
+    } catch (e: any) {
+      notify(e.message);
+    }
+  }
+
   function copyShareLink(productId: string) {
     const url = `https://t.me/${DEFAULT_BOT_USERNAME}?startapp=p_${productId}`;
     navigator.clipboard?.writeText(url);
@@ -365,9 +390,12 @@ export default function App() {
           <button onClick={() => setShowSettings(true)} className="text-xs px-2.5 py-1 bg-slate-100 text-slate-700 rounded-full">
             店铺设置
           </button>
-          <span className="text-xs px-2.5 py-1 bg-blue-100 text-blue-700 rounded-full font-medium">
-            {me?.merchant?.plan || 'FREE'}
-          </span>
+          <button
+            onClick={() => setShowUpgrade(true)}
+            className="text-xs px-2.5 py-1 bg-blue-600 text-white rounded-full font-medium"
+          >
+            {me?.merchant?.plan === 'PRO' ? 'PRO 会员' : '升级 Pro'}
+          </button>
         </div>
       </div>
 
@@ -507,6 +535,49 @@ export default function App() {
                   </div>
                 </div>
               ))}
+            </div>
+          )}
+
+          {showUpgrade && (
+            <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
+              <div className="bg-white rounded-2xl p-5 w-full max-w-sm space-y-4">
+                <div>
+                  <div className="font-bold text-base">DropDesk Pro 套餐</div>
+                  <div className="text-xs text-slate-500 mt-1">
+                    {me?.merchant?.plan === 'PRO' && me?.merchant?.plan_expires_at
+                      ? `当前有效期至：${new Date(me.merchant.plan_expires_at).toISOString().slice(0, 10)}`
+                      : '解锁无限商品上架与高级商家权益'}
+                  </div>
+                </div>
+                <div className="space-y-2.5">
+                  <button
+                    onClick={() => handleUpgrade('MONTHLY')}
+                    className="w-full flex justify-between items-center p-3.5 rounded-xl border border-blue-200 bg-blue-50/50 active:scale-95 transition"
+                  >
+                    <div className="text-left">
+                      <div className="font-semibold text-sm">Pro 月卡（30天）</div>
+                      <div className="text-xs text-slate-500">按月灵活订阅，续费自动顺延</div>
+                    </div>
+                    <div className="font-bold text-blue-600">⭐ 250</div>
+                  </button>
+                  <button
+                    onClick={() => handleUpgrade('YEARLY')}
+                    className="w-full flex justify-between items-center p-3.5 rounded-xl border border-amber-300 bg-amber-50/60 active:scale-95 transition"
+                  >
+                    <div className="text-left">
+                      <div className="font-semibold text-sm">Pro 年卡（365天）</div>
+                      <div className="text-xs text-amber-700">立省 2 个月费用</div>
+                    </div>
+                    <div className="font-bold text-amber-600">⭐ 2500</div>
+                  </button>
+                </div>
+                <button
+                  onClick={() => setShowUpgrade(false)}
+                  className="w-full py-2 border rounded-xl text-xs text-slate-600"
+                >
+                  关闭
+                </button>
+              </div>
             </div>
           )}
 

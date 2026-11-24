@@ -3,7 +3,7 @@ import type { Env, AppVariables } from '../types';
 import { telegramAuth } from '../middleware/telegramAuth';
 import { encryptKey, genId, sha256Hex } from '../services/crypto';
 import { executeOrderDelivery } from '../services/delivery';
-import { refundStarPayment } from '../services/telegramApi';
+import { createStarsInvoiceLink, refundStarPayment } from '../services/telegramApi';
 
 const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 app.use('*', telegramAuth);
@@ -362,6 +362,25 @@ app.post('/orders/:id/refund', async (c) => {
   ]);
 
   return c.json({ ok: true, data: { order_id: orderId, status: 'REFUNDED' } });
+});
+
+
+// 商家升级 Pro 套餐（生成 Telegram Stars 订阅支付链接）
+app.post('/upgrade/invoice', async (c) => {
+  const merchant = await getOrCreateMerchant(c.env.DB, c.get('tgUser'));
+  const body = await c.req.json<{ cycle?: 'MONTHLY' | 'YEARLY' }>();
+  const isYearly = body.cycle === 'YEARLY';
+  const days = isYearly ? 365 : 30;
+  const stars = isYearly ? 2500 : 250;
+
+  const invoiceUrl = await createStarsInvoiceLink(c.env.TELEGRAM_BOT_TOKEN, {
+    title: isYearly ? 'DropDesk Pro 年卡 (365天)' : 'DropDesk Pro 月卡 (30天)',
+    description: '解锁无限商品上架与高级商家权益',
+    payload: `sub:${merchant.id}:${days}`,
+    stars,
+  });
+
+  return c.json({ ok: true, data: { invoice_url: invoiceUrl, days, stars } });
 });
 
 export default app;
