@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { apiRequest, getTgWebApp } from './lib/api';
 
 type Tab = 'merchant' | 'orders' | 'buyer_orders';
+const DEFAULT_BOT_USERNAME = 'DropDesk629bot';
 
 export default function App() {
   const [startProductId, setStartProductId] = useState<string | null>(null);
@@ -16,18 +17,33 @@ export default function App() {
   const [checkoutProduct, setCheckoutProduct] = useState<any>(null);
   const [selectedVariant, setSelectedVariant] = useState<string>('');
 
+  // 店铺设置
+  const [showSettings, setShowSettings] = useState(false);
+  const [storeNameInput, setStoreNameInput] = useState('');
+  const [deliveryTplInput, setDeliveryTplInput] = useState('');
+
+  // 新建商品（支持多规格）
   const [showCreate, setShowCreate] = useState(false);
   const [title, setTitle] = useState('');
   const [desc, setDesc] = useState('');
   const [deliveryType, setDeliveryType] = useState<'KEY' | 'FILE' | 'WEBHOOK'>('KEY');
   const [fileUrl, setFileUrl] = useState('');
   const [webhookUrl, setWebhookUrl] = useState('');
-  const [variantName, setVariantName] = useState('标准版');
-  const [priceStars, setPriceStars] = useState('10');
+  const [newVariants, setNewVariants] = useState<Array<{ name: string; price_stars: string }>>([
+    { name: '标准版', price_stars: '10' },
+  ]);
 
+  // 编辑商品
+  const [editingProduct, setEditingProduct] = useState<any>(null);
+
+  // 追加规格
+  const [addVarProductId, setAddVarProductId] = useState<string | null>(null);
+  const [addVarName, setAddVarName] = useState('');
+  const [addVarPrice, setAddVarPrice] = useState('10');
+
+  // 导入卡密
   const [importVariantId, setImportVariantId] = useState<string | null>(null);
   const [keysText, setKeysText] = useState('');
-  const [botUsername, setBotUsername] = useState('');
 
   const notify = (msg: string) => {
     setToast(msg);
@@ -75,6 +91,8 @@ export default function App() {
         apiRequest('/api/merchant/orders'),
       ]);
       setMe(meData);
+      setStoreNameInput(meData?.merchant?.store_name || '');
+      setDeliveryTplInput(meData?.merchant?.delivery_template || '');
       setProducts(prodData);
       setMerchantOrders(ordData);
     } catch (e: any) {
@@ -96,8 +114,30 @@ export default function App() {
     }
   }
 
+  async function handleSaveSettings() {
+    try {
+      await apiRequest('/api/merchant/me', {
+        method: 'PUT',
+        body: JSON.stringify({
+          store_name: storeNameInput,
+          delivery_template: deliveryTplInput,
+        }),
+      });
+      setShowSettings(false);
+      notify('店铺设置已保存');
+      loadMerchantData();
+    } catch (e: any) {
+      notify(e.message);
+    }
+  }
+
   async function handleCreateProduct() {
     if (!title.trim()) return notify('请输入商品名称');
+    const validVariants = newVariants
+      .filter((v) => v.name.trim())
+      .map((v) => ({ name: v.name.trim(), price_stars: Math.max(1, Number(v.price_stars) || 1) }));
+    if (!validVariants.length) return notify('请至少填写一个规格');
+
     try {
       await apiRequest('/api/merchant/products', {
         method: 'POST',
@@ -107,13 +147,82 @@ export default function App() {
           delivery_type: deliveryType,
           file_url: deliveryType === 'FILE' ? fileUrl : undefined,
           webhook_url: deliveryType === 'WEBHOOK' ? webhookUrl : undefined,
-          variants: [{ name: variantName || '默认', price_stars: Number(priceStars) || 1 }],
+          variants: validVariants,
         }),
       });
       setShowCreate(false);
       setTitle('');
       setDesc('');
+      setFileUrl('');
+      setWebhookUrl('');
+      setNewVariants([{ name: '标准版', price_stars: '10' }]);
       notify('商品创建成功');
+      loadMerchantData();
+    } catch (e: any) {
+      notify(e.message);
+    }
+  }
+
+  async function handleSaveEditProduct() {
+    if (!editingProduct) return;
+    try {
+      await apiRequest(`/api/merchant/products/${editingProduct.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          title: editingProduct.title,
+          description: editingProduct.description,
+          file_url: editingProduct.file_url,
+          webhook_url: editingProduct.webhook_url,
+          status: editingProduct.status,
+        }),
+      });
+      setEditingProduct(null);
+      notify('商品已更新');
+      loadMerchantData();
+    } catch (e: any) {
+      notify(e.message);
+    }
+  }
+
+  async function handleToggleStatus(product: any) {
+    const nextStatus = product.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE';
+    try {
+      await apiRequest(`/api/merchant/products/${product.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      notify(nextStatus === 'ACTIVE' ? '商品已上架' : '商品已下架');
+      loadMerchantData();
+    } catch (e: any) {
+      notify(e.message);
+    }
+  }
+
+  async function handleDeleteProduct(productId: string) {
+    if (!window.confirm('确认删除该商品吗？删除后买家将无法继续购买。')) return;
+    try {
+      await apiRequest(`/api/merchant/products/${productId}`, { method: 'DELETE' });
+      notify('商品已删除');
+      loadMerchantData();
+    } catch (e: any) {
+      notify(e.message);
+    }
+  }
+
+  async function handleAddVariant() {
+    if (!addVarProductId || !addVarName.trim()) return notify('请输入规格名称');
+    try {
+      await apiRequest(`/api/merchant/products/${addVarProductId}/variants`, {
+        method: 'POST',
+        body: JSON.stringify({
+          name: addVarName.trim(),
+          price_stars: Math.max(1, Number(addVarPrice) || 1),
+        }),
+      });
+      setAddVarProductId(null);
+      setAddVarName('');
+      setAddVarPrice('10');
+      notify('规格已添加');
       loadMerchantData();
     } catch (e: any) {
       notify(e.message);
@@ -191,10 +300,9 @@ export default function App() {
   }
 
   function copyShareLink(productId: string) {
-    const bot = botUsername.trim().replace(/^@/, '') || '你的Bot用户名';
-    const url = `https://t.me/${bot}?startapp=p_${productId}`;
+    const url = `https://t.me/${DEFAULT_BOT_USERNAME}?startapp=p_${productId}`;
     navigator.clipboard?.writeText(url);
-    notify(`已复制链接：${url}`);
+    notify(`已复制购买链接`);
   }
 
   if (startProductId) {
@@ -253,9 +361,14 @@ export default function App() {
           <h1 className="text-lg font-bold">DropDesk</h1>
           <p className="text-xs text-slate-500">{me?.merchant?.store_name || 'Telegram 自动发卡与收银台'}</p>
         </div>
-        <span className="text-xs px-2.5 py-1 bg-blue-100 text-blue-700 rounded-full font-medium">
-          {me?.merchant?.plan || 'FREE'}
-        </span>
+        <div className="flex items-center gap-2">
+          <button onClick={() => setShowSettings(true)} className="text-xs px-2.5 py-1 bg-slate-100 text-slate-700 rounded-full">
+            店铺设置
+          </button>
+          <span className="text-xs px-2.5 py-1 bg-blue-100 text-blue-700 rounded-full font-medium">
+            {me?.merchant?.plan || 'FREE'}
+          </span>
+        </div>
       </div>
 
       {tab === 'merchant' && (
@@ -271,16 +384,6 @@ export default function App() {
             </div>
           </div>
 
-          <div className="bg-white p-3 rounded-xl border border-slate-100 flex items-center gap-2">
-            <span className="text-xs text-slate-500 shrink-0">我的 Bot:</span>
-            <input
-              value={botUsername}
-              onChange={(e) => setBotUsername(e.target.value)}
-              placeholder="输入你的 Bot 用户名用于生成分享链接"
-              className="text-xs w-full outline-none"
-            />
-          </div>
-
           <div className="flex justify-between items-center">
             <h2 className="font-semibold text-sm">商品管理 ({products.length})</h2>
             <button onClick={() => setShowCreate(!showCreate)} className="text-xs bg-blue-600 text-white px-3 py-1.5 rounded-lg">
@@ -290,7 +393,7 @@ export default function App() {
 
           {showCreate && (
             <div className="bg-white p-4 rounded-2xl border border-slate-200 space-y-3">
-              <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="商品名称（如：Pro 月卡激活码）" className="w-full border rounded-lg px-3 py-2 text-sm" />
+              <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="商品名称（如：Pro 会员激活码）" className="w-full border rounded-lg px-3 py-2 text-sm" />
               <textarea value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="商品描述" className="w-full border rounded-lg px-3 py-2 text-sm" rows={2} />
               <div className="grid grid-cols-3 gap-2">
                 {(['KEY', 'FILE', 'WEBHOOK'] as const).map((t) => (
@@ -305,10 +408,52 @@ export default function App() {
               {deliveryType === 'WEBHOOK' && (
                 <input value={webhookUrl} onChange={(e) => setWebhookUrl(e.target.value)} placeholder="发货回调 Webhook URL" className="w-full border rounded-lg px-3 py-2 text-sm" />
               )}
-              <div className="grid grid-cols-2 gap-2">
-                <input value={variantName} onChange={(e) => setVariantName(e.target.value)} placeholder="规格名" className="border rounded-lg px-3 py-2 text-sm" />
-                <input type="number" value={priceStars} onChange={(e) => setPriceStars(e.target.value)} placeholder="价格(Stars)" className="border rounded-lg px-3 py-2 text-sm" />
+
+              <div className="space-y-2">
+                <div className="flex justify-between items-center text-xs text-slate-500">
+                  <span>商品规格与价格 (Stars)</span>
+                  <button
+                    onClick={() => setNewVariants([...newVariants, { name: '', price_stars: '10' }])}
+                    className="text-blue-600 font-medium"
+                  >
+                    + 添加一档规格
+                  </button>
+                </div>
+                {newVariants.map((v, idx) => (
+                  <div key={idx} className="flex gap-2">
+                    <input
+                      value={v.name}
+                      onChange={(e) => {
+                        const copy = [...newVariants];
+                        copy[idx].name = e.target.value;
+                        setNewVariants(copy);
+                      }}
+                      placeholder="规格名（如：月卡）"
+                      className="flex-1 border rounded-lg px-3 py-2 text-sm"
+                    />
+                    <input
+                      type="number"
+                      value={v.price_stars}
+                      onChange={(e) => {
+                        const copy = [...newVariants];
+                        copy[idx].price_stars = e.target.value;
+                        setNewVariants(copy);
+                      }}
+                      placeholder="Stars"
+                      className="w-24 border rounded-lg px-3 py-2 text-sm"
+                    />
+                    {newVariants.length > 1 && (
+                      <button
+                        onClick={() => setNewVariants(newVariants.filter((_, i) => i !== idx))}
+                        className="px-2 text-red-500 text-xs"
+                      >
+                        删
+                      </button>
+                    )}
+                  </div>
+                ))}
               </div>
+
               <button onClick={handleCreateProduct} className="w-full py-2.5 bg-blue-600 text-white rounded-xl text-sm font-medium">
                 确认创建
               </button>
@@ -323,13 +468,19 @@ export default function App() {
                 <div key={p.id} className="bg-white p-4 rounded-2xl border border-slate-100 shadow-sm">
                   <div className="flex justify-between items-start mb-2">
                     <div>
-                      <div className="font-semibold text-sm">{p.title}</div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold text-sm">{p.title}</span>
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded ${p.status === 'ACTIVE' ? 'bg-green-50 text-green-600' : 'bg-slate-100 text-slate-500'}`}>
+                          {p.status === 'ACTIVE' ? '上架中' : '已下架'}
+                        </span>
+                      </div>
                       <div className="text-xs text-slate-400">类型: {p.delivery_type}</div>
                     </div>
                     <button onClick={() => copyShareLink(p.id)} className="text-xs text-blue-600 bg-blue-50 px-2.5 py-1 rounded-lg">
                       复制购买链接
                     </button>
                   </div>
+
                   {p.variants?.map((v: any) => (
                     <div key={v.id} className="flex justify-between items-center text-xs bg-slate-50 p-2.5 rounded-xl mt-2">
                       <span>{v.name} · ⭐ {v.price_stars}</span>
@@ -345,8 +496,62 @@ export default function App() {
                       </div>
                     </div>
                   ))}
+
+                  <div className="flex items-center gap-3 mt-3 pt-2.5 border-t border-slate-100 text-xs">
+                    <button onClick={() => setAddVarProductId(p.id)} className="text-blue-600">+ 加规格</button>
+                    <button onClick={() => setEditingProduct({ ...p })} className="text-slate-600">编辑</button>
+                    <button onClick={() => handleToggleStatus(p)} className="text-amber-600">
+                      {p.status === 'ACTIVE' ? '下架' : '上架'}
+                    </button>
+                    <button onClick={() => handleDeleteProduct(p.id)} className="text-red-500 ml-auto">删除</button>
+                  </div>
                 </div>
               ))}
+            </div>
+          )}
+
+          {showSettings && (
+            <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
+              <div className="bg-white rounded-2xl p-4 w-full max-w-sm space-y-3">
+                <div className="font-semibold text-sm">店铺设置</div>
+                <input value={storeNameInput} onChange={(e) => setStoreNameInput(e.target.value)} placeholder="店铺名称" className="w-full border rounded-xl px-3 py-2 text-sm" />
+                <textarea value={deliveryTplInput} onChange={(e) => setDeliveryTplInput(e.target.value)} rows={3} placeholder="自定义发货附言（可选，如售后联系方式）" className="w-full border rounded-xl p-3 text-xs" />
+                <div className="flex gap-2">
+                  <button onClick={() => setShowSettings(false)} className="flex-1 py-2 border rounded-xl text-xs">取消</button>
+                  <button onClick={handleSaveSettings} className="flex-1 py-2 bg-blue-600 text-white rounded-xl text-xs font-medium">保存</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {editingProduct && (
+            <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
+              <div className="bg-white rounded-2xl p-4 w-full max-w-sm space-y-3">
+                <div className="font-semibold text-sm">编辑商品</div>
+                <input value={editingProduct.title} onChange={(e) => setEditingProduct({ ...editingProduct, title: e.target.value })} className="w-full border rounded-xl px-3 py-2 text-sm" />
+                <textarea value={editingProduct.description || ''} onChange={(e) => setEditingProduct({ ...editingProduct, description: e.target.value })} rows={3} className="w-full border rounded-xl p-3 text-xs" />
+                {editingProduct.delivery_type === 'FILE' && (
+                  <input value={editingProduct.file_url || ''} onChange={(e) => setEditingProduct({ ...editingProduct, file_url: e.target.value })} placeholder="文件链接" className="w-full border rounded-xl px-3 py-2 text-xs" />
+                )}
+                <div className="flex gap-2">
+                  <button onClick={() => setEditingProduct(null)} className="flex-1 py-2 border rounded-xl text-xs">取消</button>
+                  <button onClick={handleSaveEditProduct} className="flex-1 py-2 bg-blue-600 text-white rounded-xl text-xs font-medium">保存修改</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {addVarProductId && (
+            <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
+              <div className="bg-white rounded-2xl p-4 w-full max-w-sm space-y-3">
+                <div className="font-semibold text-sm">追加新规格</div>
+                <input value={addVarName} onChange={(e) => setAddVarName(e.target.value)} placeholder="规格名（如：年卡 / 终身版）" className="w-full border rounded-xl px-3 py-2 text-sm" />
+                <input type="number" value={addVarPrice} onChange={(e) => setAddVarPrice(e.target.value)} placeholder="价格 (Stars)" className="w-full border rounded-xl px-3 py-2 text-sm" />
+                <div className="flex gap-2">
+                  <button onClick={() => setAddVarProductId(null)} className="flex-1 py-2 border rounded-xl text-xs">取消</button>
+                  <button onClick={handleAddVariant} className="flex-1 py-2 bg-blue-600 text-white rounded-xl text-xs font-medium">确认添加</button>
+                </div>
+              </div>
             </div>
           )}
 

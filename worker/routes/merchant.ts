@@ -8,7 +8,6 @@ import { refundStarPayment } from '../services/telegramApi';
 const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 app.use('*', telegramAuth);
 
-// 自动获取或初始化当前用户的商家账户
 async function getOrCreateMerchant(db: D1Database, tgUser: AppVariables['tgUser']) {
   const existing = await db
     .prepare(`SELECT * FROM merchants WHERE telegram_user_id = ?1`)
@@ -30,7 +29,6 @@ async function getOrCreateMerchant(db: D1Database, tgUser: AppVariables['tgUser'
   return db.prepare(`SELECT * FROM merchants WHERE id = ?1`).bind(id).first<any>();
 }
 
-// 商家概览与统计
 app.get('/me', async (c) => {
   const merchant = await getOrCreateMerchant(c.env.DB, c.get('tgUser'));
   const stats = await c.env.DB.prepare(
@@ -45,7 +43,27 @@ app.get('/me', async (c) => {
   return c.json({ ok: true, data: { merchant, stats } });
 });
 
-// 获取商品列表及规格、实时库存
+app.put('/me', async (c) => {
+  const merchant = await getOrCreateMerchant(c.env.DB, c.get('tgUser'));
+  const body = await c.req.json<{ store_name?: string; delivery_template?: string }>();
+
+  const storeName = body.store_name?.trim() || merchant.store_name;
+  const deliveryTemplate =
+    body.delivery_template !== undefined ? body.delivery_template.trim() : merchant.delivery_template;
+
+  await c.env.DB.prepare(
+    `UPDATE merchants SET store_name = ?1, delivery_template = ?2, updated_at = ?3 WHERE id = ?4`
+  )
+    .bind(storeName, deliveryTemplate || null, Date.now(), merchant.id)
+    .run();
+
+  const updated = await c.env.DB.prepare(`SELECT * FROM merchants WHERE id = ?1`)
+    .bind(merchant.id)
+    .first<any>();
+
+  return c.json({ ok: true, data: updated });
+});
+
 app.get('/products', async (c) => {
   const merchant = await getOrCreateMerchant(c.env.DB, c.get('tgUser'));
   const { results: products } = await c.env.DB.prepare(
@@ -72,7 +90,6 @@ app.get('/products', async (c) => {
   return c.json({ ok: true, data: list });
 });
 
-// 创建商品与规格
 app.post('/products', async (c) => {
   const merchant = await getOrCreateMerchant(c.env.DB, c.get('tgUser'));
   const body = await c.req.json<{
@@ -88,15 +105,17 @@ app.post('/products', async (c) => {
     return c.json({ ok: false, error: { code: 'INVALID_INPUT', message: '商品名称和规格不能为空' } }, 400);
   }
 
-  // 免费版限制最多 3 个活跃商品
-  if (merchant.plan === 'FREE') {
+  const isProActive =
+    merchant.plan === 'PRO' && (!merchant.plan_expires_at || merchant.plan_expires_at > Date.now());
+
+  if (!isProActive) {
     const countRow = await c.env.DB.prepare(
       `SELECT COUNT(*) AS cnt FROM products WHERE merchant_id = ?1 AND status = 'ACTIVE'`
     )
       .bind(merchant.id)
       .first<{ cnt: number }>();
     if ((countRow?.cnt || 0) >= 3) {
-      return c.json({ ok: false, error: { code: 'PLAN_LIMIT', message: '免费版最多创建 3 个商品' } }, 403);
+      return c.json({ ok: false, error: { code: 'PLAN_LIMIT', message: '免费版最多创建 3 个上架商品，升级 Pro 解锁无限制' } }, 403);
     }
   }
 
@@ -120,14 +139,15 @@ app.post('/products', async (c) => {
 
   const createdVariants: Array<{ id: string; name: string; price_stars: number }> = [];
   for (const v of body.variants) {
+    if (!v.name?.trim()) continue;
     const vid = genId('var');
     const stockMode = body.delivery_type === 'KEY' ? 'FINITE' : v.stock_mode || 'UNLIMITED';
-    createdVariants.push({ id: vid, name: v.name.trim(), price_stars: Math.floor(v.price_stars) });
+    createdVariants.push({ id: vid, name: v.name.trim(), price_stars: Math.max(1, Math.floor(v.price_stars || 1)) });
     stmts.push(
       c.env.DB.prepare(
         `INSERT INTO product_variants (id, product_id, name, price_stars, stock_mode, is_active, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)`
-      ).bind(vid, productId, v.name.trim(), Math.floor(v.price_stars), stockMode, now)
+      ).bind(vid, productId, v.name.trim(), Math.max(1, Math.floor(v.price_stars || 1)), stockMode, now)
     );
   }
 
@@ -135,7 +155,90 @@ app.post('/products', async (c) => {
   return c.json({ ok: true, data: { product_id: productId, variants: createdVariants } });
 });
 
-// 批量导入卡密（自动加密 + 去重）
+app.put('/products/:id', async (c) => {
+  const merchant = await getOrCreateMerchant(c.env.DB, c.get('tgUser'));
+  const productId = c.req.param('id');
+  const existing = await c.env.DB.prepare(
+    `SELECT * FROM products WHERE id = ?1 AND merchant_id = ?2 AND status != 'ARCHIVED'`
+  )
+    .bind(productId, merchant.id)
+    .first<any>();
+
+  if (!existing) {
+    return c.json({ ok: false, error: { code: 'NOT_FOUND', message: '商品不存在' } }, 404);
+  }
+
+  const body = await c.req.json<{
+    title?: string;
+    description?: string;
+    file_url?: string;
+    webhook_url?: string;
+    status?: 'ACTIVE' | 'INACTIVE';
+  }>();
+
+  await c.env.DB.prepare(
+    `UPDATE products
+     SET title = ?1, description = ?2, file_url = ?3, webhook_url = ?4, status = ?5, updated_at = ?6
+     WHERE id = ?7`
+  )
+    .bind(
+      body.title?.trim() || existing.title,
+      body.description !== undefined ? body.description.trim() : existing.description,
+      body.file_url !== undefined ? body.file_url.trim() || null : existing.file_url,
+      body.webhook_url !== undefined ? body.webhook_url.trim() || null : existing.webhook_url,
+      body.status || existing.status,
+      Date.now(),
+      productId
+    )
+    .run();
+
+  return c.json({ ok: true, data: { id: productId, updated: true } });
+});
+
+app.delete('/products/:id', async (c) => {
+  const merchant = await getOrCreateMerchant(c.env.DB, c.get('tgUser'));
+  const productId = c.req.param('id');
+  await c.env.DB.prepare(
+    `UPDATE products SET status = 'ARCHIVED', updated_at = ?1 WHERE id = ?2 AND merchant_id = ?3`
+  )
+    .bind(Date.now(), productId, merchant.id)
+    .run();
+
+  return c.json({ ok: true, data: { id: productId, archived: true } });
+});
+
+app.post('/products/:id/variants', async (c) => {
+  const merchant = await getOrCreateMerchant(c.env.DB, c.get('tgUser'));
+  const productId = c.req.param('id');
+  const product = await c.env.DB.prepare(
+    `SELECT * FROM products WHERE id = ?1 AND merchant_id = ?2 AND status != 'ARCHIVED'`
+  )
+    .bind(productId, merchant.id)
+    .first<any>();
+
+  if (!product) {
+    return c.json({ ok: false, error: { code: 'NOT_FOUND', message: '商品不存在' } }, 404);
+  }
+
+  const body = await c.req.json<{ name: string; price_stars: number }>();
+  if (!body.name?.trim()) {
+    return c.json({ ok: false, error: { code: 'INVALID_INPUT', message: '规格名称不能为空' } }, 400);
+  }
+
+  const vid = genId('var');
+  const price = Math.max(1, Math.floor(body.price_stars || 1));
+  const stockMode = product.delivery_type === 'KEY' ? 'FINITE' : 'UNLIMITED';
+
+  await c.env.DB.prepare(
+    `INSERT INTO product_variants (id, product_id, name, price_stars, stock_mode, is_active, created_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)`
+  )
+    .bind(vid, productId, body.name.trim(), price, stockMode, Date.now())
+    .run();
+
+  return c.json({ ok: true, data: { id: vid, name: body.name.trim(), price_stars: price } });
+});
+
 app.post('/inventory/import', async (c) => {
   const merchant = await getOrCreateMerchant(c.env.DB, c.get('tgUser'));
   const body = await c.req.json<{ variant_id: string; keys: string[] }>();
@@ -187,7 +290,6 @@ app.post('/inventory/import', async (c) => {
   });
 });
 
-// 商家查看订单列表
 app.get('/orders', async (c) => {
   const merchant = await getOrCreateMerchant(c.env.DB, c.get('tgUser'));
   const status = c.req.query('status');
@@ -213,7 +315,6 @@ app.get('/orders', async (c) => {
   return c.json({ ok: true, data: results });
 });
 
-// 手动触发/重试发货
 app.post('/orders/:id/deliver', async (c) => {
   const merchant = await getOrCreateMerchant(c.env.DB, c.get('tgUser'));
   const orderId = c.req.param('id');
@@ -227,7 +328,6 @@ app.post('/orders/:id/deliver', async (c) => {
   return c.json({ ok: true, data: { order_id: orderId, triggered: true } });
 });
 
-// 商家发起 Stars 退款
 app.post('/orders/:id/refund', async (c) => {
   const merchant = await getOrCreateMerchant(c.env.DB, c.get('tgUser'));
   const orderId = c.req.param('id');
