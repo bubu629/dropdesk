@@ -1,0 +1,11 @@
+name = "dropdesk"
+main = "worker/index.ts"
+compatibility_date = "2026-01-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "dropdesk-db"
+database_id = "aa3009c3-9f36-4d9b-a177-04c702edac2d"
+
+[triggers]
+crons = ["*/5 * * * *"]
