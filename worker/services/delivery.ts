@@ -2,6 +2,9 @@ import type { Env } from '../types';
 import { decryptKey, genId } from './crypto';
 import { sendMessage } from './telegramApi';
 
+const sendDeliveryWithWatermark = (token: string, chatId: number | string, text: string) =>
+  sendMessage(token, chatId, `${text}\n\n⚡ Powered by @DropDesk629bot · 免费创建你的自动发卡店`);
+
 export async function executeOrderDelivery(env: Env, orderId: string): Promise<void> {
   const now = Date.now();
 
@@ -102,7 +105,7 @@ export async function executeOrderDelivery(env: Env, orderId: string): Promise<v
     }
 
     // 私聊发给买家
-    await sendMessage(env.TELEGRAM_BOT_TOKEN, order.buyer_telegram_id, messageBody);
+    await sendDeliveryWithWatermark(env.TELEGRAM_BOT_TOKEN, order.buyer_telegram_id, messageBody);
 
     const doneAt = Date.now();
     await env.DB.batch([
@@ -116,7 +119,7 @@ export async function executeOrderDelivery(env: Env, orderId: string): Promise<v
     ]);
 
     // 通知商家成交（静默容错，不影响主流程）
-    await sendMessage(
+    await sendDeliveryWithWatermark(
       env.TELEGRAM_BOT_TOKEN,
       order.merchant_tg_id,
       `💰 <b>新订单已完成发货</b>\n单号：<code>${order.order_no}</code>\n商品：${item.title_snapshot}\n金额：${order.total_stars} Stars`

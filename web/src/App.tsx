@@ -371,6 +371,16 @@ export default function App() {
             >
               使用 Telegram Stars 立即购买
             </button>
+            <div className="mt-4 pt-3 border-t border-slate-100 text-center">
+              <a
+                href={`https://t.me/${DEFAULT_BOT_USERNAME}`}
+                target="_blank"
+                rel="noreferrer"
+                className="text-[11px] text-slate-400 hover:text-blue-600"
+              >
+                ⚡ Powered by DropDesk · 免费创建你的自动发卡店
+              </a>
+            </div>
           </div>
         )}
       </div>
