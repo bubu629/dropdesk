@@ -383,4 +383,79 @@ app.post('/upgrade/invoice', async (c) => {
   return c.json({ ok: true, data: { invoice_url: invoiceUrl, days, stars } });
 });
 
+
+// 查询自有 Bot 绑定状态
+app.get('/bot', async (c) => {
+  const tgUser = c.get('tgUser');
+  const merchant = await c.env.DB.prepare(
+    'SELECT id, custom_bot_username FROM merchants WHERE telegram_user_id = ?1'
+  ).bind(tgUser.id).first<any>();
+  if (!merchant) return c.json({ ok: false, error: { code: 'NOT_FOUND', message: '商家不存在' } }, 404);
+  return c.json({
+    ok: true,
+    data: {
+      merchant_id: merchant.id,
+      bound: Boolean(merchant.custom_bot_username),
+      bot_username: merchant.custom_bot_username || null
+    }
+  });
+});
+
+// 绑定自有 Bot（加密存 Token + 自动配置动态 Webhook）
+app.post('/bot', async (c) => {
+  const tgUser = c.get('tgUser');
+  const { bot_token } = await c.req.json<{ bot_token: string }>();
+  const token = (bot_token || '').trim();
+  if (!token || !token.includes(':')) {
+    return c.json({ ok: false, error: { code: 'INVALID_TOKEN', message: 'Bot Token 格式不正确' } }, 400);
+  }
+
+  const merchant = await c.env.DB.prepare(
+    'SELECT id FROM merchants WHERE telegram_user_id = ?1'
+  ).bind(tgUser.id).first<{ id: string }>();
+  if (!merchant) return c.json({ ok: false, error: { code: 'NOT_FOUND', message: '商家不存在' } }, 404);
+
+  // 1) 调用 Telegram getMe 校验 Token
+  const meRes = await fetch(`https://api.telegram.org/bot${token}/getMe`);
+  const meJson = await meRes.json<any>();
+  if (!meJson.ok || !meJson.result?.username) {
+    return c.json({ ok: false, error: { code: 'INVALID_TOKEN', message: 'Token 校验失败，请检查是否从 BotFather 复制完整' } }, 400);
+  }
+  const botUsername = meJson.result.username;
+
+  // 2) 生成随机 Webhook Secret 并设置 Webhook
+  const secret = genId('whs');
+  const webhookUrl = `https://sudburycheck.ca/api/webhooks/merchant/${merchant.id}`;
+  const whRes = await fetch(`https://api.telegram.org/bot${token}/setWebhook`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      url: webhookUrl,
+      secret_token: secret,
+      allowed_updates: ['message', 'pre_checkout_query']
+    })
+  });
+  const whJson = await whRes.json<any>();
+  if (!whJson.ok) {
+    return c.json({ ok: false, error: { code: 'WEBHOOK_FAILED', message: '设置 Webhook 失败: ' + (whJson.description || '') } }, 400);
+  }
+
+  // 3) 加密保存 Token
+  const encToken = await encryptKey(token, c.env.KEY_ENCRYPTION_SECRET);
+  await c.env.DB.prepare(
+    'UPDATE merchants SET custom_bot_token_enc = ?1, custom_bot_username = ?2, custom_bot_secret = ?3, updated_at = ?4 WHERE id = ?5'
+  ).bind(encToken, botUsername, secret, Date.now(), merchant.id).run();
+
+  return c.json({ ok: true, data: { bound: true, bot_username: botUsername, webhook_url: webhookUrl } });
+});
+
+// 解绑自有 Bot
+app.delete('/bot', async (c) => {
+  const tgUser = c.get('tgUser');
+  await c.env.DB.prepare(
+    'UPDATE merchants SET custom_bot_token_enc = NULL, custom_bot_username = NULL, custom_bot_secret = NULL, updated_at = ?1 WHERE telegram_user_id = ?2'
+  ).bind(Date.now(), tgUser.id).run();
+  return c.json({ ok: true, data: { bound: false } });
+});
+
 export default app;

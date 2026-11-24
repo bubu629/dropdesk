@@ -2,7 +2,7 @@ import type { Env } from '../types';
 import { decryptKey, genId } from './crypto';
 import { sendMessage } from './telegramApi';
 
-const sendDeliveryWithWatermark = (token: string, chatId: number | string, text: string) =>
+const sendDeliveryWithWatermark = (token: string, chatId: number, text: string) =>
   sendMessage(token, chatId, `${text}\n\n⚡ Powered by @DropDesk629bot · Launch your free store / 免费创建你的自动发卡店`);
 
 export async function executeOrderDelivery(env: Env, orderId: string): Promise<void> {

@@ -1,13 +1,39 @@
 import { Hono } from 'hono';
 import type { Env, AppVariables } from '../types';
 import { telegramAuth } from '../middleware/telegramAuth';
-import { genId, genOrderNo } from '../services/crypto';
+import { genId, genOrderNo, decryptKey } from '../services/crypto';
 import { lockKeysForOrder } from '../services/inventory';
 import { createStarsInvoiceLink } from '../services/telegramApi';
 
 const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 
 // 公开接口：获取商品详情（买家通过分享链接打开）
+
+// 公开接口：获取商家独立店铺主页及全部上架商品
+app.get('/stores/:merchantId', async (c) => {
+  const merchantId = c.req.param('merchantId');
+  const merchant = await c.env.DB.prepare(
+    'SELECT id, store_name, username, custom_bot_username FROM merchants WHERE id = ?1 AND status = \'ACTIVE\''
+  ).bind(merchantId).first<any>();
+
+  if (!merchant) {
+    return c.json({ ok: false, error: { code: 'NOT_FOUND', message: '店铺不存在' } }, 404);
+  }
+
+  const { results: products } = await c.env.DB.prepare(
+    `SELECT p.id, p.title, p.description, p.delivery_type,
+            MIN(pv.price_stars) AS min_price_stars,
+            COUNT(pv.id) AS variant_count
+     FROM products p
+     JOIN product_variants pv ON pv.product_id = p.id AND pv.is_active = 1
+     WHERE p.merchant_id = ?1 AND p.status = 'ACTIVE'
+     GROUP BY p.id
+     ORDER BY p.created_at DESC`
+  ).bind(merchantId).all();
+
+  return c.json({ ok: true, data: { merchant, products } });
+});
+
 app.get('/products/:id', async (c) => {
   const productId = c.req.param('id');
   const product = await c.env.DB.prepare(
@@ -103,12 +129,18 @@ app.post('/orders/:id/invoice', async (c) => {
     return c.json({ ok: false, error: { code: 'ORDER_INVALID', message: '订单已过期或不可支付' } }, 400);
   }
 
-  const invoiceUrl = await createStarsInvoiceLink(c.env.TELEGRAM_BOT_TOKEN, {
+  const invoiceUrl = await (async () => {
+      const mRow = await c.env.DB.prepare('SELECT custom_bot_token_enc FROM merchants WHERE id = ?1').bind(order.merchant_id).first<{ custom_bot_token_enc: string | null }>();
+      const resolveMerchantBotToken = mRow?.custom_bot_token_enc
+        ? await decryptKey(mRow.custom_bot_token_enc, c.env.KEY_ENCRYPTION_SECRET)
+        : c.env.TELEGRAM_BOT_TOKEN;
+      return createStarsInvoiceLink(resolveMerchantBotToken, {
     title: `${order.title_snapshot} - ${order.variant_snapshot}`,
     description: `订单号: ${order.order_no}`,
     payload: order.id,
     stars: order.total_stars,
   });
+    })()
 
   await c.env.DB.prepare(`UPDATE orders SET status = 'PENDING_PAYMENT', updated_at = ?1 WHERE id = ?2`)
     .bind(Date.now(), orderId)

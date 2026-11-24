@@ -1,3 +1,4 @@
+import { decryptKey } from '../services/crypto';
 import { Hono } from 'hono';
 import type { Env } from '../types';
 import { genId } from '../services/crypto';
@@ -141,6 +142,71 @@ app.post('/telegram', async (c) => {
   }
 
   return c.text('OK');
+});
+
+
+// 动态商家独立 Bot Webhook（Stars 直接进商家账户并由商家 Bot 自动发货）
+app.post('/merchant/:merchantId', async (c) => {
+  const merchantId = c.req.param('merchantId');
+  const secretHeader = c.req.header('X-Telegram-Bot-Api-Secret-Token');
+
+  const merchant = await c.env.DB.prepare(
+    'SELECT id, store_name, custom_bot_token_enc, custom_bot_secret FROM merchants WHERE id = ?1'
+  ).bind(merchantId).first<any>();
+
+  if (!merchant || !merchant.custom_bot_token_enc || merchant.custom_bot_secret !== secretHeader) {
+    return c.json({ ok: false }, 401);
+  }
+
+  const botToken = await decryptKey(merchant.custom_bot_token_enc, c.env.KEY_ENCRYPTION_SECRET);
+  const update = await c.req.json<any>();
+
+  // 1) 预结账确认
+  if (update.pre_checkout_query) {
+    await fetch(`https://api.telegram.org/bot${botToken}/answerPreCheckoutQuery`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pre_checkout_query_id: update.pre_checkout_query.id, ok: true })
+    });
+    return c.json({ ok: true });
+  }
+
+  // 2) Stars 支付成功 -> 幂等更新订单并用商家自己的 Bot 自动发货
+  if (update.message?.successful_payment) {
+    const sp = update.message.successful_payment;
+    const payload = sp.invoice_payload || '';
+    const orderId = payload.startsWith('order_') ? payload.replace('order_', '') : payload;
+    const chargeId = sp.telegram_payment_charge_id;
+
+    const updated = await c.env.DB.prepare(
+      "UPDATE orders SET status = 'PAID', telegram_payment_charge_id = ?1, paid_at = ?2, updated_at = ?2 WHERE id = ?3 AND status IN ('CREATED', 'PENDING_PAYMENT', 'PENDING')"
+    ).bind(chargeId, Date.now(), orderId).run();
+
+    if ((updated.meta?.changes || 0) > 0) {
+      const merchantEnv = { ...c.env, TELEGRAM_BOT_TOKEN: botToken };
+      c.executionCtx.waitUntil(executeOrderDelivery(merchantEnv, orderId));
+    }
+    return c.json({ ok: true });
+  }
+
+  // 3) 买家发送 /start -> 引导打开该商家的独立店铺页
+  if (update.message?.text?.startsWith('/start')) {
+    const chatId = update.message.chat.id;
+    const storeUrl = `https://t.me/DropDesk629bot?startapp=store_${merchant.id}`;
+    await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: `👋 欢迎来到 ${merchant.store_name}！\n点击下方按钮浏览全部商品，支持 Telegram Stars 付款自动发货。`,
+        reply_markup: {
+          inline_keyboard: [[{ text: '🛍️ 进入店铺 / Open Store', url: storeUrl }]]
+        }
+      })
+    });
+  }
+
+  return c.json({ ok: true });
 });
 
 export default app;

@@ -17,6 +17,11 @@ export default function App() {
   const t = dict[lang];
 
   const [startProductId, setStartProductId] = useState<string | null>(null);
+  const [startStoreId, setStartStoreId] = useState<string | null>(null);
+  const [storefront, setStorefront] = useState<any>(null);
+  const [botInfo, setBotInfo] = useState<{ bound: boolean; bot_username: string | null }>({ bound: false, bot_username: null });
+  const [botTokenInput, setBotTokenInput] = useState('');
+  const [botSaving, setBotSaving] = useState(false);
   const [tab, setTab] = useState<Tab>('merchant');
   const [loading, setLoading] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -72,6 +77,15 @@ export default function App() {
       new URLSearchParams(window.location.search).get('startapp') ||
       '';
 
+    if (startParam.startsWith('store_')) {
+      const sid = startParam.slice(6);
+      setStartStoreId(sid);
+      apiRequest(`/api/store/stores/${sid}`)
+        .then((data) => setStorefront(data))
+        .catch((e: any) => notify(e.message));
+      return;
+    }
+
     if (startParam.startsWith('p_')) {
       const pid = startParam.slice(2);
       setStartProductId(pid);
@@ -94,7 +108,47 @@ export default function App() {
     }
   }
 
-  async function loadMerchantData() {
+  
+  async function handleBindBot() {
+    if (!botTokenInput.trim()) return notify(lang === 'zh' ? '请先粘贴 Bot Token' : 'Please paste Bot Token');
+    setBotSaving(true);
+    try {
+      const res = await apiRequest('/api/merchant/bot', {
+        method: 'POST',
+        body: JSON.stringify({ bot_token: botTokenInput.trim() }),
+      });
+      setBotInfo({ bound: true, bot_username: res.bot_username });
+      setBotTokenInput('');
+      notify(lang === 'zh' ? `已绑定 @${res.bot_username}，Stars 将直接进你的账户` : `Bound @${res.bot_username}!`);
+    } catch (e: any) {
+      notify(e.message);
+    } finally {
+      setBotSaving(false);
+    }
+  }
+
+  async function handleUnbindBot() {
+    setBotSaving(true);
+    try {
+      await apiRequest('/api/merchant/bot', { method: 'DELETE' });
+      setBotInfo({ bound: false, bot_username: null });
+      notify(lang === 'zh' ? '已解绑，恢复使用默认收款 Bot' : 'Unbound custom bot');
+    } catch (e: any) {
+      notify(e.message);
+    } finally {
+      setBotSaving(false);
+    }
+  }
+
+  function copyStoreLink() {
+    const mid = me?.merchant?.id;
+    if (!mid) return;
+    const url = `https://t.me/${DEFAULT_BOT_USERNAME}?startapp=store_${mid}`;
+    navigator.clipboard?.writeText(url);
+    notify(lang === 'zh' ? '店铺主页链接已复制' : 'Storefront link copied!');
+  }
+
+async function loadMerchantData() {
     setLoading(true);
     try {
       const [meData, prodData, ordData] = await Promise.all([
@@ -107,6 +161,7 @@ export default function App() {
       setDeliveryTplInput(meData?.merchant?.delivery_template || '');
       setProducts(prodData);
       setMerchantOrders(ordData);
+      apiRequest('/api/merchant/bot').then((b) => setBotInfo(b)).catch(() => {});
     } catch (e: any) {
       notify(e.message);
     } finally {
@@ -327,6 +382,62 @@ export default function App() {
     const url = `https://t.me/${DEFAULT_BOT_USERNAME}?startapp=p_${productId}`;
     navigator.clipboard?.writeText(url);
     notify(t.copiedLink);
+  }
+
+  
+  /* STOREFRONT_VIEW */
+  if (startStoreId && !startProductId) {
+    return (
+      <div className="container" style={{ maxWidth: 520, margin: '0 auto', padding: 16 }}>
+        {toast && <div className="toast">{toast}</div>}
+        {!storefront ? (
+          <div className="card" style={{ textAlign: 'center', padding: 32 }}>
+            {lang === 'zh' ? '正在加载店铺...' : 'Loading storefront...'}
+          </div>
+        ) : (
+          <>
+            <div className="card" style={{ marginBottom: 14 }}>
+              <h2 style={{ margin: '0 0 6px' }}>🛍️ {storefront.merchant?.store_name}</h2>
+              <div style={{ fontSize: 13, opacity: 0.75 }}>
+                {lang === 'zh' ? 'Telegram Stars 付款 · 付款后 1 秒自动发货' : 'Pay with Telegram Stars · Instant auto-delivery'}
+              </div>
+            </div>
+            {(storefront.products || []).length === 0 ? (
+              <div className="card" style={{ textAlign: 'center', padding: 24, opacity: 0.7 }}>
+                {lang === 'zh' ? '该店铺暂未上架商品' : 'No active products yet.'}
+              </div>
+            ) : (
+              (storefront.products || []).map((p: any) => (
+                <div
+                  key={p.id}
+                  className="card"
+                  style={{ marginBottom: 12, cursor: 'pointer' }}
+                  onClick={() => {
+                    setStartProductId(p.id);
+                    apiRequest(`/api/store/products/${p.id}`)
+                      .then((data) => {
+                        setCheckoutProduct(data);
+                        if (data.variants?.length) setSelectedVariant(data.variants[0].id);
+                      })
+                      .catch((e: any) => notify(e.message));
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                    <strong style={{ fontSize: 16 }}>{p.title}</strong>
+                    <span style={{ fontWeight: 700, color: '#2481cc', whiteSpace: 'nowrap' }}>
+                      ⭐ {p.min_price_stars}+
+                    </span>
+                  </div>
+                  {p.description && (
+                    <p style={{ margin: '6px 0 0', fontSize: 13, opacity: 0.75 }}>{p.description}</p>
+                  )}
+                </div>
+              ))
+            )}
+          </>
+        )}
+      </div>
+    );
   }
 
   if (startProductId) {
@@ -590,6 +701,61 @@ export default function App() {
                   <button onClick={() => setShowSettings(false)} className="flex-1 py-2 border rounded-xl text-xs">{t.cancel}</button>
                   <button onClick={handleSaveSettings} className="flex-1 py-2 bg-blue-600 text-white rounded-xl text-xs font-medium">{t.save}</button>
                 </div>
+
+            <div className="border-t pt-3 space-y-2">
+              <div className="font-semibold text-xs">
+                🔗 {lang === 'zh' ? '商家独立店铺主页' : 'Merchant Storefront Link'}
+              </div>
+              <button
+                type="button"
+                onClick={copyStoreLink}
+                className="w-full py-2 border rounded-xl text-xs font-medium"
+              >
+                {lang === 'zh' ? '复制店铺主页链接 (?startapp=store_...)' : 'Copy Storefront Link'}
+              </button>
+
+              <div className="font-semibold text-xs pt-1">
+                🤖 {lang === 'zh' ? '绑定自有收款 Bot（Stars 直达你账户）' : 'Custom Bot (Direct Stars Settlement)'}
+              </div>
+              {botInfo.bound ? (
+                <div className="space-y-2 text-xs">
+                  <div className="text-green-600 font-medium">
+                    ✅ {lang === 'zh' ? `已绑定：@${botInfo.bot_username}` : `Bound: @${botInfo.bot_username}`}
+                  </div>
+                  <button
+                    type="button"
+                    disabled={botSaving}
+                    onClick={handleUnbindBot}
+                    className="w-full py-2 border rounded-xl text-xs"
+                  >
+                    {lang === 'zh' ? '解绑自有 Bot' : 'Unbind Bot'}
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <div className="text-xs text-gray-500">
+                    {lang === 'zh'
+                      ? '去 @BotFather 创建专属 Bot，粘贴 Token 自动配置 Webhook，收款 Stars 直接归你所有。'
+                      : 'Create a bot via @BotFather and paste its token here. Stars payments will settle directly to your bot.'}
+                  </div>
+                  <input
+                    type="password"
+                    placeholder="123456789:ABCdefGHIjklMNO..."
+                    value={botTokenInput}
+                    onChange={(e) => setBotTokenInput(e.target.value)}
+                    className="w-full border rounded-xl px-3 py-2 text-xs"
+                  />
+                  <button
+                    type="button"
+                    disabled={botSaving}
+                    onClick={handleBindBot}
+                    className="w-full py-2 bg-blue-600 text-white rounded-xl text-xs font-medium"
+                  >
+                    {botSaving ? '...' : lang === 'zh' ? '验证并绑定自有 Bot' : 'Verify & Bind Bot'}
+                  </button>
+                </div>
+              )}
+            </div>
               </div>
             </div>
           )}
