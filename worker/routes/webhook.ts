@@ -136,7 +136,7 @@ app.post('/telegram', async (c) => {
     await sendMessage(
       c.env.TELEGRAM_BOT_TOKEN,
       chatId,
-      `👋 欢迎使用 <b>DropDesk</b>！\n\n点击左下角菜单按钮即可打开商家后台或查看已购订单。`
+      `👋 Welcome to <b>DropDesk</b>!\nSell digital goods & license keys in Telegram with Stars — zero code, instant auto-delivery.\n\n👋 欢迎使用 <b>DropDesk</b>！\n点击左下角菜单按钮即可打开商家后台或查看已购订单。`
     ).catch(() => {});
   }
 

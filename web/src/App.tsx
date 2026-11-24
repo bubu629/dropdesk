@@ -378,7 +378,7 @@ export default function App() {
                 rel="noreferrer"
                 className="text-[11px] text-slate-400 hover:text-blue-600"
               >
-                ⚡ Powered by DropDesk · 免费创建你的自动发卡店
+                ⚡ Powered by DropDesk · Free Auto-Delivery Store / 免费开店
               </a>
             </div>
           </div>
